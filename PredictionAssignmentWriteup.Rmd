@@ -1,0 +1,279 @@
+---
+title: 'Peer-graded Assignment: Prediction Assignment Writeup'
+author: "Stefano Vedovelli (spinwing) spinwing at yahoo dot it"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+# Peer-graded Assignment: Prediction Assignment Writeup
+
+## Synopsis
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+In this project, we will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+We will use those data to identify via Machine Learning if the subjects will perform correctly 10 repetitions of the Unilateral Dumbbell Biceps Curl.
+
+## Credits
+Data was acquired from http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har.
+Training and testing sets were already provided as:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har#ixzz4qa54zvAC
+
+## Notes
+I've used Microsoft R 3.4.0. The performance of the Microsoft distribution compared
+to the standard R are simply outstanding. I reccomend, in case you want to run 
+the code yourself, to install and use the Microsoft distribution.
+
+# Acquiring and preparing the data
+
+```{r load-libraries, echo=TRUE, warning=FALSE}
+# preloads required libraries
+library(caret)
+library(randomForest)
+library(Hmisc)
+#library(dplyr)
+
+# parallel processing on multicore computers
+#library(parallel)
+
+# missmap function
+library(Amelia)
+```
+
+```{r load-data}
+set.seed(1234)
+
+# remember to set your home directory manually!
+workdir = "J:/Dropbox/Coursera/Data Science/8. Practical Machine Learning/Project/PMLAssign"
+# creates and sets the working directory
+if (!file.exists(workdir)) {
+  dir.create(workdir)
+}
+
+setwd(workdir)
+train.url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test.url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+ftrain = paste(workdir, basename(train.url), sep="/")
+ftest = paste(workdir, basename(test.url), sep="/")
+
+# load if not exists
+if (!file.exists(ftrain)) {
+  download.file(train.url, destfile=ftrain, method="curl")
+}
+if (!file.exists(ftest)) {
+  # if not download
+  download.file(test.url, destfile=ftest, method="curl")
+}
+
+# now load the data
+train = read.csv(ftrain, stringsAsFactors = FALSE)
+test = read.csv(ftest, stringsAsFactors = FALSE)
+```
+
+## Data analysis and exploration
+
+```{r train-dim}
+print(dim(train))
+```
+The training set dataset has 160 variables over 19622 observations. We can divide
+the datataset into 5 groups of variables:
+
+* General variables
+* belt related variables
+* arm related variables
+* dumbell related variables
+* forearm related variables
+
+In order to run a basic exploratory data analysis, a mix of R commands 
+and OpenRefine (www.openrefine.org) was used.
+
+After first inspection it was clear that a lot of variables were either 
+emtpy or not populated enough. A quick chart from missmap (from the Amelia package)
+confirmed my suspicion. In the example the belt subset was examined.
+
+```{r miss-map, echo=TRUE}
+missmap(train[grep("belt", names(train))], main="Missing map - belt variables")
+```
+
+In R, a missing value is often noted with the "NA" symbol, which stands for not available.
+Though you can assign an argument such as na.rm to remove the effect of NA, it is
+better to impute or remove the missing data in the dataset to prevent propagating the effect
+of the missing value.
+
+Further examination reveled that the data contains:
+
+* near zerovariables,
+* "#DIV/0!" errors (division by zero)
+* variables containing a high quantity of NAs. 
+ 
+Data needs to be sanitized where possible. Given that the amount of missing data
+is too large to attempt imputting via prediction packages, we eliminate
+them.
+
+```{r clean-data}
+# removing unnecessary features
+train.clean <- train[,-c(1:6)]
+
+# setting NAs to zero so that nzv (near zero covariates) will remove them
+train.clean[is.na(train.clean)] <- 0
+
+# obtains new dataframe without near zero covariantes
+nzv <- nearZeroVar(train.clean)
+train.nzv <- train.clean[,-nzv]
+train.nzv$classe <- as.factor(train.nzv$classe)
+dim(train.nzv)
+```
+The cleaned training set now presents only 54 meaningful variables. The outcome
+is then converted to a factor.
+
+## Exploratory analysis
+Outcomes of the exercises are classified as:
+
+* Class A: correct exercise
+* Class B,C,D,E: incorrect exercises corresponding to common mistakes
+
+Given the high number of variables, it makes sense to perform an exploratory analysis.
+Let's first review the outcomes
+```{r bar-plot}
+barplot(table(train.nzv$classe), main="Exercises by classe")
+```
+
+# Feature Selection
+Unlike other scenarios, where we can scan for features correlation in order to isolate the
+best features to be used in the prediction, in this study continuous variables do no really 
+fit the approach. We  therefore need to use a different
+approach to isolate those features that best fit our model.
+
+First, we want to identify highly correlated attributes. Selecting the right features in 
+the data can mean the difference between mediocre performance with long 
+training times and great performance with short training times.
+
+Let's first analyse which are the most highly correlated variables.
+
+```{r feature-selection, warning=FALSE, message=FALSE}
+library(mlbench)
+correlationMatrix <- cor(train.nzv[,1:ncol(train.nzv)-1])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.75)
+# removing highly correlated features
+train.fin <- train.nzv[,-highlyCorrelated]
+names(train.nzv)[highlyCorrelated]
+```
+Caret offers a popular automatic feature selection called Recursive Feature Elimination (RFE).
+
+We will use a Random Forest algorithm to explore all possible subset of attributes. 
+Given that the train sample is quite large (19622 rows), we will use a smaller 
+sample of 500 rows to economize machine time
+
+```{r rf-feature-selection, warning=FALSE}
+# define the control using a random forest selection function
+control <- rfeControl(functions=rfFuncs, method="cv", number=10, allowParallel = TRUE)
+train.small <- train.fin[sample(nrow(train.fin), size=500),]
+# run the RFE algorithm
+results <- rfe(train.small[,1:ncol(train.small)-1], train.small[,ncol(train.small)], sizes=c(1:ncol(train.small)-1), rfeControl=control)
+# list the chosen features
+predictors(results)
+# plot the results
+plot(results, type=c("g", "o"))
+# and we get the final train dataset
+train.fin <- train.fin[, c(predictors(results), "classe")]
+```
+
+As we can observe, the number of valuable predictors is quite limited compared to the 
+large quantity of variables recorded. Using only those predictors will shorten
+the amount of computation work, while maintaining a high degree of accuracy.
+
+## Cross Validation
+The test sample will be used as a validation, therefore we will cross validate the training set. 
+Training will provide the sub-training and the sub-testing.
+
+```{r cross-validation}
+inTrain <- createDataPartition(y=train.fin$classe, p=0.7, list=FALSE)
+subTrain <- train.nzv[inTrain,]
+subTest <- train.nzv[-inTrain, ]
+
+```
+
+## Fitting the models
+We will use four different classifiers and compare their result to select the best performing model.
+
+The classifiers are:
+
+* rpart
+* lda
+* knn
+* rf
+
+**WARNING this is going to take quite a while on the whole training sample**
+
+After execution, the four models are compared to verify which one is the best performing.
+
+```{r execute-models}
+
+# prepare training scheme
+control <- trainControl(method="cv", number=5, allowParallel = TRUE)
+# CART
+set.seed(12345)
+fit.cart <- train(classe~., data=subTrain, method="rpart", trControl=control)
+# LDA
+set.seed(12345)
+fit.lda <- train(classe~., data=subTrain, method="lda", trControl=control)
+# kNN
+set.seed(12345)
+fit.knn <- train(classe~., data=subTrain, method="knn", trControl=control)
+# Random Forest
+set.seed(12345)
+fit.rf <- train(classe~., data=subTrain, method="rf", trControl=control)
+# collect resamples
+results <- resamples(list(CART=fit.cart, LDA=fit.lda, KNN=fit.knn, RF=fit.rf))
+
+# summarize differences between modes
+summary(results)
+
+# box and whisker plots to compare models
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales=scales)
+```
+
+Comparing the results of four regression models, it appears clear that Random Forests 
+largely outperform every other algorithm. 
+
+## Out-of-Sample Errors
+
+Let's now use the Random Forest model to predict on the sub-test set to calculate
+the out-of-sample errors.
+
+```{r conf-matrix}
+predSubTest <- predict(fit.rf, newdata=subTest)
+confm <- confusionMatrix(predSubTest, subTest$classe)
+```
+
+```{r conf-table}
+print(confm$table)
+```
+```{r conf-overall}
+print(confm$overall[1])
+```
+Let's verify the out-of-sample Error rate manually.
+```{r ooserr, echo=TRUE}
+samAcc <- sum(predSubTest == subTest$classe)/length(predSubTest)
+oosErr <- (1 - samAcc) * 100
+print(oosErr)
+```
+
+## Applying the model to the test set
+
+We now have our final model that we can apply to the real test set, and we finally write it to file
+for submission to the Course Project Prediction Quiz.
+
+In order to respect the Coursera Honour Code, the final steps are obfuscated. There's
+no free lunch...
