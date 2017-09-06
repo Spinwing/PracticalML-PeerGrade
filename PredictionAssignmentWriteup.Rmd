@@ -272,8 +272,8 @@ print(oosErr)
 
 ## Applying the model to the test set
 
-We now have our final model that we can apply to the real test set, and we finally write it to file
-for submission to the Course Project Prediction Quiz.
+We now have our final model that we can apply to the real test set, and we finally
+can submit to the Course Project Prediction Quiz.
 
 In order to respect the Coursera Honour Code, the final steps are obfuscated. There's
 no free lunch...
